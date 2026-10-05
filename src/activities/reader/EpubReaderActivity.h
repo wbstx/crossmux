@@ -48,6 +48,9 @@ class EpubReaderActivity final : public ReaderActivity {
   bool showBookmarkMessage = false;
   bool showDictionaryMessage = false;
   unsigned long dictionaryMessageTime = 0UL;
+  bool showClippingMessage = false;
+  unsigned long clippingMessageTime = 0UL;
+  const char* clippingMessageText = nullptr;
   bool currentPageBookmarked = false;
   int idlePrewarmSpine = -1;
   int idlePrewarmPage = -1;
@@ -240,6 +243,10 @@ class EpubReaderActivity final : public ReaderActivity {
   void activateMoreRow(int row);
   void openFootnoteSelect(bool reopenMenuOnCancel);
   void openDictionaryWordSelect();
+  void startClipSelection();
+  void openClippingList();
+  void drawClippingHighlights(const Page& page, int fontId, int orientedMarginTop,
+                              int orientedMarginLeft) const;
   bool launchKOReaderSync();
 #ifdef ENABLE_CHINESE_VERSION
   bool launchWeReadSync();

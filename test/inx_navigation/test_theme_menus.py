@@ -208,7 +208,7 @@ struct { bool light=false; bool present(){return light;} } Frontlight;
     code += '''struct MenuItem {MenuAction action; StrId labelId; bool operator==(const MenuItem&) const = default;};
 struct EpubReaderMenuActivity {
  static constexpr int MAX_MENU_ITEMS=32;
- void buildMenuItems(std::vector<MenuItem>&,bool,bool);
+ void buildMenuItems(std::vector<MenuItem>&,bool,bool,bool);
  void reference(std::vector<MenuItem>&,bool,bool);
  void historical(std::vector<MenuItem>&,bool,bool);
 };
@@ -258,7 +258,12 @@ int main(){
  for(int flags=0;flags<8;++flags) for(bool isInx:{false,true}) {
   inx=isInx; Frontlight.light=flags&1; EpubReaderMenuActivity a;
   std::vector<MenuItem> actual,expected;
-  a.buildMenuItems(actual,flags&2,flags&4);
+  a.buildMenuItems(actual,flags&2,flags&4,false);
+  // Clippings are new; strip them so the historical menu-order check stays stable.
+  actual.erase(std::remove_if(actual.begin(), actual.end(),
+    [](const MenuItem& item) {
+      return item.action == MenuAction::CREATE_CLIPPING || item.action == MenuAction::VIEW_CLIPPINGS;
+    }), actual.end());
   a.reference(expected,flags&2,flags&4);
   assert(actual==expected);
  }
