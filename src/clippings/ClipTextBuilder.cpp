@@ -73,6 +73,37 @@ bool areWordsVisuallyAttached(const WordRef& previousWord, const WordRef& word) 
   return previousWord.x <= word.x + word.w + 2;
 }
 
+// CJK (Han, kana, CJK punctuation, full-width forms) wraps without spaces, so a
+// line break between two such tokens must not become a space in the clipping.
+// Hangul is excluded: Korean separates words with spaces.
+bool isCjkCodepoint(const uint32_t cp) {
+  return (cp >= 0x2E80 && cp <= 0x9FFF) || (cp >= 0xF900 && cp <= 0xFAFF) || (cp >= 0xFE30 && cp <= 0xFE4F) ||
+         (cp >= 0xFF00 && cp <= 0xFFEF) || (cp >= 0x20000 && cp <= 0x3FFFF);
+}
+
+uint32_t decodeUtf8At(const std::string& text, const size_t index) {
+  const auto c0 = static_cast<unsigned char>(text[index]);
+  if (c0 < 0x80) return c0;
+  const size_t len = c0 >= 0xF0 ? 4 : c0 >= 0xE0 ? 3 : c0 >= 0xC0 ? 2 : 1;
+  if (len == 1 || index + len > text.size()) return c0;
+  uint32_t cp = c0 & (0x7F >> len);
+  for (size_t i = 1; i < len; ++i) cp = (cp << 6) | (static_cast<unsigned char>(text[index + i]) & 0x3F);
+  return cp;
+}
+
+uint32_t firstCodepoint(const std::string& text) { return text.empty() ? 0 : decodeUtf8At(text, 0); }
+
+uint32_t lastCodepoint(const std::string& text) {
+  if (text.empty()) return 0;
+  size_t index = text.size() - 1;
+  while (index > 0 && (static_cast<unsigned char>(text[index]) & 0xC0) == 0x80) --index;
+  return decodeUtf8At(text, index);
+}
+
+bool joinsWithoutSpace(const std::string& previousText, const std::string& nextText) {
+  return isCjkCodepoint(lastCodepoint(previousText)) || isCjkCodepoint(firstCodepoint(nextText));
+}
+
 std::string selectedWordText(const ClipWordStore& wordStore, const WordRef& word,
                              const SelectionBounds* selectionBounds) {
   const bool isFirstBound = selectionBounds && word.pageIdx == selectionBounds->firstPageIdx &&
@@ -160,7 +191,10 @@ ClippingResult build(const ClipWordStore& wordStore, const uint16_t* wordOrder, 
     if (paragraphStart) {
       text += '\n';
     } else if (!text.empty()) {
-      const bool attached = previousWord && areWordsVisuallyAttached(*previousWord, word);
+      const bool lineBreak =
+          previousWord && (word.pageIdx != previousWord->pageIdx || word.y != previousWord->y);
+      const bool attached = previousWord && (areWordsVisuallyAttached(*previousWord, word) ||
+                                             (lineBreak && joinsWithoutSpace(previousClean, wordText)));
       if (!attached) {
         text += ' ';
       }

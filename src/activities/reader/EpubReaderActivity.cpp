@@ -4093,13 +4093,7 @@ CrossPointPosition EpubReaderActivity::getCurrentPosition() const {
 }
 
 void EpubReaderActivity::startClipSelection() {
-  if (!section || !epub) {
-    requestUpdate();
-    return;
-  }
-
-  auto page = section->loadPage(section->currentPage);
-  if (!page) {
+  if (!section || !epub || section->pageCount <= 0) {
     requestUpdate();
     return;
   }
@@ -4110,74 +4104,31 @@ void EpubReaderActivity::startClipSelection() {
   orientedMarginTop += SETTINGS.screenMargin;
   orientedMarginLeft += SETTINGS.screenMargin;
 
-  const int fontId = SETTINGS.getReaderFontId();
-  const int lineHeight = renderer.getLineHeight(fontId);
-  ClipWordStore wordStore;
-  wordStore.words.reserve(128);
-  wordStore.textPool.reserve(2048);
-
-  std::string pageText;
-  pageText.reserve(2048);
-  uint8_t styleMask = 0;
-  uint16_t pageWordIndex = 0;
-
-  for (const auto& element : page->elements) {
-    if (element->getTag() != TAG_PageLine) continue;
-    const auto* line = static_cast<const PageLine*>(element.get());
-    const auto* block = line->getBlock().get();
-    if (!block || !block->valid()) continue;
-    const int ascender = renderer.getFontAscenderSize(fontId);
-    const int rubyShift = block->getRubyShift(ascender);
-    for (uint16_t i = 0; i < block->wordCount(); ++i) {
-      const char* text = block->wordText(i);
-      if (!text || !*text) continue;
-      bool visible = false;
-      for (const uint8_t* p = reinterpret_cast<const uint8_t*>(text); *p; ++p) {
-        if (*p > 0x20) {
-          visible = true;
-          break;
-        }
-      }
-      if (!visible) continue;
-
-      WordRef word;
-      word.x = line->xPos + block->wordXpos(i) + orientedMarginLeft;
-      word.y = line->yPos + orientedMarginTop + rubyShift;
-      word.h = lineHeight;
-      word.pageIdx = 0;
-      word.pageWordIndex = pageWordIndex++;
-      word.style = block->wordStyle(i);
-      if (!wordStore.appendText(word, text)) break;
-      wordStore.words.push_back(word);
-      pageText.append(text);
-      pageText.push_back(' ');
-      styleMask |= static_cast<uint8_t>(1u << (static_cast<uint8_t>(word.style) & 0x03));
-    }
-  }
-
-  if (styleMask == 0) styleMask = 0x01;
-  renderer.ensureSdCardFontReady(fontId, pageText.c_str(), styleMask);
-  for (auto& word : wordStore.words) {
-    word.w = renderer.getTextAdvanceX(fontId, wordStore.text(word), word.style);
-  }
-
-  if (wordStore.words.empty()) {
-    LOG_ERR("CLIP", "No selectable words on current EPUB page");
-    requestUpdate();
-    return;
-  }
+  // The selector loads words lazily, one line at a time, from this and the
+  // following section pages (real pageIdx); see ClipSelectionActivity.
+  ClipSelectionActivity::Layout layout;
+  layout.fontId = SETTINGS.getReaderFontId();
+  layout.marginLeft = orientedMarginLeft;
+  layout.marginTop = orientedMarginTop;
+  layout.contentRight = renderer.getScreenWidth() - orientedMarginRight - SETTINGS.screenMargin;
+  // Page stride for the continuous soft-advance column: the content height the
+  // section was laid out for.
+  layout.viewportHeight = buildViewportHeight > 0 ? buildViewportHeight
+                                                  : renderer.getScreenHeight() - orientedMarginTop -
+                                                        std::max(static_cast<int>(SETTINGS.screenMargin),
+                                                                 static_cast<int>(orientedMarginBottom));
+  layout.linePitch = renderer.getLineHeight(
+      layout.fontId, effectiveRenderSpec(buildViewportWidth, static_cast<uint16_t>(layout.viewportHeight)).lineCompression);
+  const ClipSelectionLimits limits = ClipSelectionActivity::currentLimits();
 
   std::string bookTitle = epub->getTitle();
   std::string author = epub->getAuthor();
   std::string chapterTitle;
   const int tocIndex = epub->getTocIndexForSpineIndex(currentSpineIndex);
   if (tocIndex >= 0) chapterTitle = epub->getTocItem(tocIndex).title;
-  const int sectionPage = section->currentPage;
-  const int sectionPageCount = section->pageCount > 0 ? section->pageCount : 1;
 
-  auto clipSelection = makeUniqueNoThrow<ClipSelectionActivity>(
-      renderer, mappedInput, std::move(wordStore), std::move(page), fontId, orientedMarginLeft, orientedMarginTop,
-      sectionPage, sectionPageCount);
+  auto clipSelection = makeUniqueNoThrow<ClipSelectionActivity>(renderer, mappedInput, *section,
+                                                                section->currentPage, layout, limits);
   if (!clipSelection) {
     LOG_ERR("CLIP", "OOM: ClipSelectionActivity");
     requestUpdate();
