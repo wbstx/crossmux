@@ -61,7 +61,6 @@ ClipSelectionLimits ClipSelectionActivity::currentLimits() {
   psramAvailable = psram.totalBytes > 0;
   psramLargest = psram.largestBlockBytes;
 #endif
-  psramAvailable = false; // TEMP
   const auto heap = HalMemory::getDefaultHeap();
   const ClipSelectionLimits limits =
       ClipSelectionLimitPolicy::choose(psramAvailable, psramLargest, heap.largestBlockBytes);
@@ -602,6 +601,15 @@ int ClipSelectionActivity::visibleClipBottom() {
   return std::max(layout.marginTop, cut);
 }
 
+
+void ClipSelectionActivity::ensureVisiblePagesCached() {
+  const int stride = layout.viewportHeight;
+  if (stride <= 0) return;
+  const int firstPage = scrollY / stride;
+  const int lastPage = (scrollY + layout.viewportHeight - 1) / stride;
+  for (int p = firstPage; p <= lastPage; ++p) (void)cachedPage(p);
+}
+
 // ---------------------------------------------------------------------------
 // Interaction
 // ---------------------------------------------------------------------------
@@ -893,6 +901,7 @@ void ClipSelectionActivity::drawHints() const {
 }
 
 void ClipSelectionActivity::renderPages() {
+  ensureVisiblePagesCached();
   const int stride = layout.viewportHeight;
   const int screenW = renderer.getScreenWidth();
   const int screenH = renderer.getScreenHeight();
