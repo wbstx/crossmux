@@ -2579,6 +2579,9 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // The cache is the finished page, cleared margins and all, so no clearScreen
     // is needed on this path.
     memcpy(renderer.getFrameBuffer(), pageCacheBase_[pageCacheLiveSlot_].get(), renderer.getBufferSize());
+    // Highlights are drawn on the cached page; the idle cache does not store them.
+    renderer.setRenderMode(GfxRenderer::BW);
+    drawClippingHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft);
     cacheBaseMs = millis() - tBase;
   } else
 #endif
@@ -2832,6 +2835,8 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
         // Both planes were rendered at idle; putting them in place is one copy
         // each instead of a full page render each.
         memcpy(renderer.getFrameBuffer(), pageCacheLsb_[pageCacheLiveSlot_].get(), renderer.getBufferSize());
+        renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
+        drawClippingHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft);
         renderer.copyGrayscaleLsbBuffers();
       } else
 #endif
@@ -2857,6 +2862,8 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 #if FREEINK_DEVICE_READPICO
       if (pageCacheHit) {
         memcpy(renderer.getFrameBuffer(), pageCacheMsb_[pageCacheLiveSlot_].get(), renderer.getBufferSize());
+        renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
+        drawClippingHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft);
         renderer.copyGrayscaleMsbBuffers();
       } else
 #endif
@@ -4440,8 +4447,9 @@ uint16_t EpubReaderActivity::resolveClippingJumpPage(const Clipping& clipping) c
       ClippingTextAnchor::AnchorMatch match;
       if (!pageContains(page, match)) return std::nullopt;
       uint16_t best = page;
-      // Walk back across a clipping that continues onto this page.
-      for (uint16_t cursor = page; cursor > 0 && page - cursor < 4; --cursor) {
+      // Walk back to the page where this clipping starts.
+      constexpr uint16_t kWalkBackPages = 16;
+      for (uint16_t cursor = page; cursor > 0 && page - cursor < kWalkBackPages; --cursor) {
         ClippingTextAnchor::AnchorMatch previous;
         if (!pageContains(static_cast<uint16_t>(cursor - 1), previous)) break;
         best = static_cast<uint16_t>(cursor - 1);
