@@ -308,6 +308,7 @@ EpubReaderActivity::~EpubReaderActivity() {
 }
 
 void EpubReaderActivity::onExit() {
+  clippings.onExit();
   if (footnoteDepth > 0 && epub) {
     const SavedPosition& origin = savedPositions[0];
     saveProgress(origin.spineIndex, origin.pageNumber, 0);
@@ -461,6 +462,7 @@ bool EpubReaderActivity::loadBook() {
 
   loadLinkStack();
   loadCachedBookmarks();
+  clippings.onBookLoaded();
   return true;
 }
 
@@ -779,6 +781,8 @@ void EpubReaderActivity::loop() {
     showDictionaryMessage = false;
     requestUpdate();
   }
+
+  clippings.loop();
 
   // The toolbar reader menu owns all input while shown, ahead of the automatic page turn
   // below: the More panel's rate popup switches automatic turning on and leaves the panel
@@ -1135,6 +1139,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
   };
 
   switch (action) {
+    case EpubReaderMenuActivity::MenuAction::CREATE_CLIPPING:
+    case EpubReaderMenuActivity::MenuAction::VIEW_CLIPPINGS:
+      clippings.onMenuAction(action);
+      break;
     case EpubReaderMenuActivity::MenuAction::SELECT_CHAPTER: {
       const int spineIdx = currentSpineIndex;
       const int tocIdx = currentTocIndex();
@@ -1903,6 +1911,8 @@ void EpubReaderActivity::renderBook() {
     section->currentPage = section->pageCount - 1;
   }
 
+  clippings.applyPendingJump();
+
   applyDeferredReposition();
 
   renderer.clearScreen();
@@ -2001,6 +2011,8 @@ void EpubReaderActivity::renderBook() {
   if (showDictionaryMessage) {
     GUI.drawPopup(renderer, tr(STR_DICT_NO_DICT_SET));
   }
+
+  clippings.drawMessage();
 
   // Toolbar menu: overlay the toolbar / panel on top of the freshly rendered page.
   if (overlay != Overlay::None && usesToolbarMenu()) {
@@ -2364,6 +2376,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   const auto renderPage = [&] {
     GfxRenderer::SyntheticBoldScope syntheticBold(renderer, SETTINGS.fakeBold);
     page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
+    clippings.drawHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft);
   };
 
   struct PxcSlotGuard {
@@ -2536,6 +2549,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // The cache is the finished page, cleared margins and all, so no clearScreen
     // is needed on this path.
     memcpy(renderer.getFrameBuffer(), pageCacheBase_[pageCacheLiveSlot_].get(), renderer.getBufferSize());
+    clippings.drawHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft, GfxRenderer::BW);
     cacheBaseMs = millis() - tBase;
   } else
 #endif
@@ -2789,6 +2803,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
         // Both planes were rendered at idle; putting them in place is one copy
         // each instead of a full page render each.
         memcpy(renderer.getFrameBuffer(), pageCacheLsb_[pageCacheLiveSlot_].get(), renderer.getBufferSize());
+        clippings.drawHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft, GfxRenderer::GRAYSCALE_LSB);
         renderer.copyGrayscaleLsbBuffers();
       } else
 #endif
@@ -2814,6 +2829,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 #if FREEINK_DEVICE_READPICO
       if (pageCacheHit) {
         memcpy(renderer.getFrameBuffer(), pageCacheMsb_[pageCacheLiveSlot_].get(), renderer.getBufferSize());
+        clippings.drawHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft, GfxRenderer::GRAYSCALE_MSB);
         renderer.copyGrayscaleMsbBuffers();
       } else
 #endif

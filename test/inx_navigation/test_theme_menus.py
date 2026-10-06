@@ -206,6 +206,8 @@ struct { bool light=false; bool present(){return light;} } Frontlight;
     code += 'const char* tr(StrId id){ switch(id){'+''.join(f'case StrId::{i}: return "{i}";' for i in ids)+'} return "?";}\n'
     code += 'enum class MenuAction {'+','.join(menu_actions)+'};\n'
     code += '''struct MenuItem {MenuAction action; StrId labelId; bool operator==(const MenuItem&) const = default;};
+// Clipping rows are appended by the clippings feature; keep the historical order check unchanged.
+struct ClippingController { static void appendMenuItems(std::vector<MenuItem>&) {} };
 struct EpubReaderMenuActivity {
  static constexpr int MAX_MENU_ITEMS=32;
  void buildMenuItems(std::vector<MenuItem>&,bool,bool);
