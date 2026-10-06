@@ -148,9 +148,20 @@ struct DirectPixelWriter {
   // Must be called after beginRow() for the current row.
   // No bounds checking — caller guarantees coordinates are valid.
   inline void writePixel(int logicalX, uint8_t pixelValue, bool writeWhiteInBw = false) const {
-    auto pixel = GfxRenderer::mapTwoBitPixel(mode, pixelValue);
-    if (mode == GfxRenderer::BW && writeWhiteInBw && pixelValue >= 3) pixel = {true, false};
-    if (!pixel.draw) return;
+    bool draw = false;
+    bool state = false;
+    if ((mode == GfxRenderer::GRAYSCALE_MSB || mode == GfxRenderer::GRAYSCALE_LSB) && absolute) {
+      // Absolute gray planes are cleared to 0xFF, so every level is stored.
+      const auto pixel = grayPlanePixel(pixelValue, mode == GfxRenderer::GRAYSCALE_MSB, true);
+      draw = pixel.write;
+      state = pixel.black;
+    } else {
+      auto pixel = GfxRenderer::mapTwoBitPixel(mode, pixelValue);
+      if (mode == GfxRenderer::BW && writeWhiteInBw && pixelValue >= 3) pixel = {true, false};
+      draw = pixel.draw;
+      state = pixel.state;
+    }
+    if (!draw) return;
 
     const int phyX = rowPhyXBase + logicalX * phyXStepX;
     const int phyY = rowPhyYBase + logicalX * phyYStepX;
@@ -171,7 +182,7 @@ struct DirectPixelWriter {
     const uint32_t byteIndex = static_cast<uint32_t>(sy * displayWidthBytes + (phyX >> 3));
     const uint8_t bitMask = 1 << (7 - (phyX & 7));
 
-    if (GfxRenderer::framebufferState(mode, pixel.state)) {
+    if (GfxRenderer::framebufferState(mode, state)) {
       fb[byteIndex] &= ~bitMask;  // Clear bit (draw black)
     } else {
       fb[byteIndex] |= bitMask;  // Set bit (draw white)
