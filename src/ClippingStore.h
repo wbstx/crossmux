@@ -17,6 +17,9 @@ inline constexpr uint8_t CLIPPING_LAYOUT_START_RESOLVED = 1U << 0;
 inline constexpr uint8_t CLIPPING_LAYOUT_END_RESOLVED = 1U << 1;
 inline constexpr uint8_t CLIPPING_LAYOUT_BOUNDARIES_RESOLVED =
     CLIPPING_LAYOUT_START_RESOLVED | CLIPPING_LAYOUT_END_RESOLVED;
+inline constexpr uint8_t CLIPPING_TEXT_MATCH_AUTHORITATIVE = 1U << 2;
+// Phrases shorter than this stay live text matches so a repeated word is not pinned to one page.
+inline constexpr uint16_t CLIPPING_RETARGET_MIN_UNITS = 8;
 
 inline uint32_t clippingWordLayoutSignature(const uint32_t readerLayoutSignature) {
   if (readerLayoutSignature == 0) return 0;
@@ -43,6 +46,13 @@ struct Clipping {
   // Session-only migration state, intentionally omitted from the on-disk
   // record.
   uint8_t resolvedLayoutBoundaries = 0;
+  // Session-only page range found by text match for textMatchSignature.
+  uint32_t textMatchSignature = 0;
+  uint16_t textMatchStartPage = UINT16_MAX;
+  uint16_t textMatchEndPage = UINT16_MAX;
+  uint16_t textMatchStartWord = 0;
+  uint16_t textMatchEndWord = 0;
+  uint8_t textMatchBoundaries = 0;
   char chapterTitle[CLIPPING_CHAPTER_TITLE_MAX] = {};
 };
 
@@ -90,6 +100,8 @@ class ClippingStore {
   const std::vector<Clipping>& getClippings() const { return clippings; }
   bool cacheResolvedLayoutRange(size_t index, uint16_t page, uint16_t startWord, uint16_t endWord,
                                 uint32_t layoutSignature);
+  void noteTextMatch(size_t index, uint16_t page, uint16_t startWord, uint16_t endWord, bool startsAtClipStart,
+                     bool reachesClipEnd, uint16_t clipUnits, uint32_t layoutSignature);
   bool readClippingText(size_t index, std::string& out) const;
   bool readClippingPreview(size_t index, std::string& out) const;
   bool readClippingText(const Clipping& clipping, std::string& out) const;
@@ -152,6 +164,19 @@ inline bool clippingCachedRangeReadyOnPage(const Clipping& clipping, const uint1
     return false;
   }
   return true;
+}
+
+inline bool clippingTextMatchOnPage(const Clipping& clipping, const uint16_t page, const uint32_t layoutSignature,
+                                    uint16_t& startWord, uint16_t& endWord) {
+  if (layoutSignature == 0 || clipping.textMatchSignature != layoutSignature ||
+      (clipping.textMatchBoundaries & CLIPPING_TEXT_MATCH_AUTHORITATIVE) == 0 ||
+      clipping.textMatchStartPage > clipping.textMatchEndPage || page < clipping.textMatchStartPage ||
+      page > clipping.textMatchEndPage) {
+    return false;
+  }
+  startWord = page == clipping.textMatchStartPage ? clipping.textMatchStartWord : 0;
+  endWord = page == clipping.textMatchEndPage ? clipping.textMatchEndWord : UINT16_MAX;
+  return startWord <= endWord;
 }
 
 inline bool cacheClippingResolvedLayoutRange(Clipping& clipping, const uint16_t page, const uint16_t startWord,
