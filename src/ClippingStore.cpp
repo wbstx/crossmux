@@ -192,6 +192,43 @@ bool ClippingStore::cacheResolvedLayoutRange(const size_t index, const uint16_t 
   return true;
 }
 
+void ClippingStore::noteTextMatch(const size_t index, const uint16_t page, const uint16_t startWord,
+                                  const uint16_t endWord, const bool startsAtClipStart, const bool reachesClipEnd,
+                                  const uint16_t clipUnits, const uint32_t layoutSignature) {
+  if (index >= clippings.size() || layoutSignature == 0 || startWord > endWord) return;
+  Clipping& clipping = clippings[index];
+  if ((clipping.textMatchBoundaries & CLIPPING_TEXT_MATCH_AUTHORITATIVE) != 0 &&
+      clipping.textMatchSignature == layoutSignature) {
+    return;
+  }
+  if (clipping.textMatchSignature != layoutSignature) {
+    clipping.textMatchSignature = layoutSignature;
+    clipping.textMatchBoundaries = 0;
+    clipping.textMatchStartPage = UINT16_MAX;
+    clipping.textMatchEndPage = UINT16_MAX;
+  }
+  if (startsAtClipStart) {
+    clipping.textMatchStartPage = page;
+    clipping.textMatchStartWord = startWord;
+    clipping.textMatchBoundaries |= CLIPPING_LAYOUT_START_RESOLVED;
+  }
+  if (reachesClipEnd) {
+    clipping.textMatchEndPage = page;
+    clipping.textMatchEndWord = endWord;
+    clipping.textMatchBoundaries |= CLIPPING_LAYOUT_END_RESOLVED;
+  }
+  if ((clipping.textMatchBoundaries & CLIPPING_LAYOUT_BOUNDARIES_RESOLVED) != CLIPPING_LAYOUT_BOUNDARIES_RESOLVED ||
+      clipping.textMatchStartPage > clipping.textMatchEndPage || clipUnits < CLIPPING_RETARGET_MIN_UNITS) {
+    return;
+  }
+  const uint16_t oldSpan =
+      clipping.endPage >= clipping.startPage ? static_cast<uint16_t>(clipping.endPage - clipping.startPage) : 0;
+  const uint16_t maxSpan =
+      oldSpan > UINT16_MAX / 3 ? UINT16_MAX : std::max<uint16_t>(8, static_cast<uint16_t>(oldSpan * 3));
+  if (static_cast<uint16_t>(clipping.textMatchEndPage - clipping.textMatchStartPage) > maxSpan) return;
+  clipping.textMatchBoundaries |= CLIPPING_TEXT_MATCH_AUTHORITATIVE;
+}
+
 bool ClippingStore::readClippingPreview(const size_t index, std::string& out) const {
   out.clear();
   const Clipping* clipping = clippingAt(index);

@@ -20,6 +20,8 @@
 #include "ReaderToolbarUi.h"
 #include "components/OptionPopup.h"
 
+struct Clipping;
+
 class EpubReaderActivity final : public ReaderActivity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
@@ -172,6 +174,11 @@ class EpubReaderActivity final : public ReaderActivity {
 
   uint16_t buildViewportWidth = 0;
   uint16_t buildViewportHeight = 0;
+  // Reused across highlight passes; released in onExit().
+  mutable std::vector<const char*> clippingWordScratch;
+  mutable std::vector<const char*> clippingCombinedScratch;
+  mutable std::string clippingTextScratch;
+  uint16_t pendingClippingJump = UINT16_MAX;
 
   int lastSavedSpineIndex = -1;
   int lastSavedPage = -1;
@@ -247,6 +254,14 @@ class EpubReaderActivity final : public ReaderActivity {
   void openClippingList();
   void drawClippingHighlights(const Page& page, int fontId, int orientedMarginTop,
                               int orientedMarginLeft) const;
+  uint32_t currentClippingLayoutSignature() const;
+  void collectClippingWords(const Page& page, std::vector<const char*>& out) const;
+  bool matchClippingOnPage(uint16_t pageIndex, const Page& page, const char* text, uint16_t& startWord,
+                           uint16_t& endWord, bool* startsAtClipStart, bool* reachesClipEnd) const;
+  bool clippingRangeOnPage(size_t clippingIndex, const Clipping& clipping, const Page& page, uint16_t currentPage,
+                           uint16_t currentPageCount, uint32_t layoutSignature, uint16_t& startWord,
+                           uint16_t& endWord) const;
+  uint16_t resolveClippingJumpPage(const Clipping& clipping) const;
   bool launchKOReaderSync();
 #ifdef ENABLE_CHINESE_VERSION
   bool launchWeReadSync();

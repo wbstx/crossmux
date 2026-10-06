@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "../ClippingStore.h"
 #include "../CrossPointSettings.h"
 
 namespace {
@@ -130,9 +131,9 @@ bool ClippingsManager::saveClipping(const std::string& bookTitle, const std::str
   }
   location += "\n";
 
-  static constexpr size_t MAX_TEXT_BYTES = 2000;
-  const size_t textLen = static_cast<size_t>(
-      utf8SafeTruncateBuffer(selectedText.data(), static_cast<int>(std::min(selectedText.size(), MAX_TEXT_BYTES))));
+  // The export keeps the same text the clipping store saved.
+  const size_t textLen = static_cast<size_t>(utf8SafeTruncateBuffer(
+      selectedText.data(), static_cast<int>(std::min(selectedText.size(), CLIPPING_TEXT_MAX))));
   static constexpr char separator[] = "\n==========\n";
 
   std::string buffer;

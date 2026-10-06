@@ -35,6 +35,7 @@
 #include "ClippingStore.h"
 #include "DictionaryWordSelectActivity.h"
 #include "EpubReaderClippingListActivity.h"
+#include "clippings/ClippingTextAnchor.h"
 #include "clippings/ClippingsManager.h"
 #include "activities/reader/WordRef.h"
 #include "EpubReaderBookmarksActivity.h"
@@ -313,6 +314,12 @@ EpubReaderActivity::~EpubReaderActivity() {
 }
 
 void EpubReaderActivity::onExit() {
+  clippingWordScratch.clear();
+  clippingWordScratch.shrink_to_fit();
+  clippingCombinedScratch.clear();
+  clippingCombinedScratch.shrink_to_fit();
+  clippingTextScratch.clear();
+  clippingTextScratch.shrink_to_fit();
   CLIPPINGS.unload();
   if (footnoteDepth > 0 && epub) {
     const SavedPosition& origin = savedPositions[0];
@@ -1923,6 +1930,17 @@ void EpubReaderActivity::renderBook() {
     section->currentPage = section->pageCount - 1;
   }
 
+  if (pendingClippingJump != UINT16_MAX && !section->isBuilding() && !section->isPartial() && section->pageCount > 0) {
+    if (const Clipping* clipping = CLIPPINGS.clippingAt(pendingClippingJump)) {
+      if (clipping->spineIndex == static_cast<uint16_t>(currentSpineIndex)) {
+        section->currentPage = resolveClippingJumpPage(*clipping);
+      }
+    }
+    pendingClippingJump = UINT16_MAX;
+    if (section->currentPage < 0) section->currentPage = 0;
+    if (section->currentPage >= section->pageCount) section->currentPage = section->pageCount - 1;
+  }
+
   applyDeferredReposition();
 
   renderer.clearScreen();
@@ -2561,6 +2579,9 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // The cache is the finished page, cleared margins and all, so no clearScreen
     // is needed on this path.
     memcpy(renderer.getFrameBuffer(), pageCacheBase_[pageCacheLiveSlot_].get(), renderer.getBufferSize());
+    // Highlights are drawn on the cached page; the idle cache does not store them.
+    renderer.setRenderMode(GfxRenderer::BW);
+    drawClippingHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft);
     cacheBaseMs = millis() - tBase;
   } else
 #endif
@@ -2814,6 +2835,8 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
         // Both planes were rendered at idle; putting them in place is one copy
         // each instead of a full page render each.
         memcpy(renderer.getFrameBuffer(), pageCacheLsb_[pageCacheLiveSlot_].get(), renderer.getBufferSize());
+        renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
+        drawClippingHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft);
         renderer.copyGrayscaleLsbBuffers();
       } else
 #endif
@@ -2839,6 +2862,8 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 #if FREEINK_DEVICE_READPICO
       if (pageCacheHit) {
         memcpy(renderer.getFrameBuffer(), pageCacheMsb_[pageCacheLiveSlot_].get(), renderer.getBufferSize());
+        renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
+        drawClippingHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft);
         renderer.copyGrayscaleMsbBuffers();
       } else
 #endif
@@ -4147,7 +4172,7 @@ void EpubReaderActivity::startClipSelection() {
         const auto addResult = CLIPPINGS.addClipping(
             static_cast<uint16_t>(currentSpineIndex), clip.sectionPage, clip.endSectionPage, clip.sectionPageCount,
             clip.startPageWordIndex, clip.endPageWordIndex, clip.wordCount, chapterTitle.c_str(), clip.paragraphIndex,
-            clip.text, clip.tableSelection, /*layoutSignature=*/0);
+            clip.text, clip.tableSelection, clippingWordLayoutSignature(currentClippingLayoutSignature()));
         bool exported = false;
         if (addResult == ClippingStore::AddResult::Added) {
           exported = ClippingsManager::saveClipping(bookTitle, author, chapterTitle,
@@ -4187,26 +4212,271 @@ void EpubReaderActivity::openClippingList() {
         const auto& jump = std::get<ClippingJumpResult>(result.data);
         RenderLock lock;
         clearDeferredReposition();
-        if (jump.paragraphIndex != UINT16_MAX && section &&
-            static_cast<int>(jump.spineIndex) == currentSpineIndex) {
-          if (const auto page = section->getPageForParagraphIndex(jump.paragraphIndex)) {
-            section->currentPage = *page;
-            requestUpdate();
-            return;
-          }
-        }
-        if (currentSpineIndex != static_cast<int>(jump.spineIndex)) {
-          currentSpineIndex = jump.spineIndex;
-          nextPageNumber = jump.page;
-          section.reset();
-        } else if (section) {
-          section->currentPage = jump.page;
+        const Clipping* clipping =
+            jump.clippingIndex != UINT16_MAX ? CLIPPINGS.clippingAt(jump.clippingIndex) : nullptr;
+        const bool sameSpine = section && static_cast<int>(jump.spineIndex) == currentSpineIndex;
+        const bool layoutReady = sameSpine && !section->isBuilding() && !section->isPartial() && section->pageCount > 0;
+        if (clipping && layoutReady && clipping->spineIndex == jump.spineIndex) {
+          section->currentPage = resolveClippingJumpPage(*clipping);
+          pendingClippingJump = UINT16_MAX;
         } else {
-          nextPageNumber = jump.page;
+          pendingClippingJump = jump.clippingIndex;
+          if (!sameSpine) {
+            currentSpineIndex = jump.spineIndex;
+            nextPageNumber = jump.page;
+            section.reset();
+          } else if (section) {
+            section->currentPage = jump.page;
+          } else {
+            nextPageNumber = jump.page;
+          }
         }
         requestUpdate();
       },
       epub);
+}
+
+namespace {
+
+bool clippingWordVisible(const char* text) {
+  if (!text) return false;
+  for (const auto* p = reinterpret_cast<const uint8_t*>(text); *p; ++p) {
+    if (*p > 0x20) return true;
+  }
+  return false;
+}
+
+uint16_t approximateRelayoutPage(const Clipping& clipping, const uint16_t currentPageCount) {
+  if (currentPageCount == 0) return 0;
+  if (clipping.pageCount <= 1) return 0;
+  const uint32_t oldLastPage = static_cast<uint32_t>(clipping.pageCount - 1);
+  const uint32_t newLastPage = static_cast<uint32_t>(currentPageCount - 1);
+  const uint32_t scaled =
+      (static_cast<uint32_t>(clipping.startPage) * newLastPage + oldLastPage / 2U) / oldLastPage;
+  return static_cast<uint16_t>(std::min<uint32_t>(scaled, static_cast<uint32_t>(currentPageCount - 1)));
+}
+
+}  // namespace
+
+uint32_t EpubReaderActivity::currentClippingLayoutSignature() const {
+  if (buildViewportWidth == 0 || buildViewportHeight == 0) return 0;
+  const ReaderRenderSpec spec = effectiveRenderSpec(buildViewportWidth, buildViewportHeight);
+  uint32_t hash = 2166136261u;
+  const auto mix = [&hash](const uint32_t value) {
+    hash ^= value;
+    hash *= 16777619u;
+  };
+  mix(static_cast<uint32_t>(spec.fontId));
+  uint32_t lineBits = 0;
+  memcpy(&lineBits, &spec.lineCompression, sizeof(lineBits));
+  mix(lineBits);
+  mix(spec.extraParagraphSpacing);
+  mix(spec.firstLineIndent);
+  mix(spec.paragraphIndentSpaces);
+  mix(static_cast<uint32_t>(static_cast<int32_t>(spec.characterSpacing)));
+  mix(spec.wordSpacingPercent);
+  mix(spec.paragraphAlignment);
+  mix(spec.viewportWidth);
+  mix(spec.viewportHeight);
+  mix(spec.hyphenationEnabled ? 1u : 0u);
+  mix(spec.embeddedStyle ? 1u : 0u);
+  mix(spec.imageRendering);
+  mix(spec.focusReadingEnabled ? 1u : 0u);
+  return hash == 0 ? 1u : hash;
+}
+
+void EpubReaderActivity::collectClippingWords(const Page& page, std::vector<const char*>& out) const {
+  out.clear();
+  uint16_t count = 0;
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* block = static_cast<const PageLine*>(element.get())->getBlock().get();
+    if (!block || !block->valid()) continue;
+    for (uint16_t i = 0; i < block->wordCount(); ++i) {
+      if (clippingWordVisible(block->wordText(i))) count++;
+    }
+  }
+  if (count == 0) return;
+  if (out.capacity() < count) out.reserve(count);
+  for (const auto& element : page.elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* block = static_cast<const PageLine*>(element.get())->getBlock().get();
+    if (!block || !block->valid()) continue;
+    for (uint16_t i = 0; i < block->wordCount(); ++i) {
+      const char* text = block->wordText(i);
+      if (clippingWordVisible(text)) out.push_back(text);
+    }
+  }
+}
+
+bool EpubReaderActivity::matchClippingOnPage(const uint16_t pageIndex, const Page& page, const char* text,
+                                              uint16_t& startWord, uint16_t& endWord, bool* startsAtClipStart,
+                                              bool* reachesClipEnd) const {
+  if (!section || !text || text[0] == '\0') return false;
+  collectClippingWords(page, clippingWordScratch);
+  if (clippingWordScratch.empty() || clippingWordScratch.size() > UINT16_MAX) return false;
+
+  const auto apply = [&](const ClippingTextAnchor::AnchorMatch& found) {
+    startWord = found.startWord;
+    endWord = found.endWord;
+    if (startsAtClipStart) *startsAtClipStart = found.startsAtClipStart;
+    if (reachesClipEnd) *reachesClipEnd = found.reachesClipEnd;
+  };
+
+  ClippingTextAnchor::AnchorMatch found;
+  const auto* words = clippingWordScratch.data();
+  const auto wordCount = static_cast<uint16_t>(clippingWordScratch.size());
+  if (ClippingTextAnchor::findClippingAnchor(words, wordCount, text, found)) {
+    apply(found);
+    return true;
+  }
+
+  if (!ClippingTextAnchor::findClippingAnchor(words, wordCount, text, found,
+                                              ClippingTextAnchor::AnchorSearch::IncludeShort)) {
+    return false;
+  }
+
+  const uint16_t pageWords = wordCount;
+  for (const int direction : {-1, 1}) {
+    const int neighborIndex = static_cast<int>(pageIndex) + direction;
+    if (neighborIndex < 0 || neighborIndex >= section->pageCount) continue;
+    auto neighbor = section->loadPage(neighborIndex);
+    if (!neighbor) {
+      LOG_ERR("CLIP", "Could not verify clipping across page %d", neighborIndex);
+      continue;
+    }
+    const bool pageIsFirst = direction > 0;
+    uint16_t boundary = 0;
+    if (!pageIsFirst) {
+      collectClippingWords(*neighbor, clippingCombinedScratch);
+      if (clippingCombinedScratch.empty()) continue;
+      boundary = static_cast<uint16_t>(clippingCombinedScratch.size());
+      if (static_cast<size_t>(boundary) + clippingWordScratch.size() > UINT16_MAX) continue;
+      if (clippingCombinedScratch.capacity() < static_cast<size_t>(boundary) + clippingWordScratch.size()) {
+        clippingCombinedScratch.reserve(static_cast<size_t>(boundary) + clippingWordScratch.size());
+      }
+      clippingCombinedScratch.insert(clippingCombinedScratch.end(), clippingWordScratch.begin(),
+                                     clippingWordScratch.end());
+    } else {
+      // Copy this page before collectClippingWords reuses clippingWordScratch for the neighbor.
+      clippingCombinedScratch.assign(clippingWordScratch.begin(), clippingWordScratch.end());
+      collectClippingWords(*neighbor, clippingWordScratch);
+      if (clippingWordScratch.empty()) continue;
+      boundary = pageWords;
+      if (static_cast<size_t>(boundary) + clippingWordScratch.size() > UINT16_MAX) continue;
+      if (clippingCombinedScratch.capacity() < static_cast<size_t>(boundary) + clippingWordScratch.size()) {
+        clippingCombinedScratch.reserve(static_cast<size_t>(boundary) + clippingWordScratch.size());
+      }
+      clippingCombinedScratch.insert(clippingCombinedScratch.end(), clippingWordScratch.begin(),
+                                     clippingWordScratch.end());
+    }
+
+    ClippingTextAnchor::AnchorMatch combined;
+    if (!ClippingTextAnchor::findClippingAnchor(clippingCombinedScratch.data(),
+                                                static_cast<uint16_t>(clippingCombinedScratch.size()), text,
+                                                combined) ||
+        combined.startWord >= boundary || combined.endWord < boundary) {
+      continue;
+    }
+    ClippingTextAnchor::AnchorMatch pageMatch;
+    if (!ClippingTextAnchor::clipAnchorToPage(combined, boundary, pageIsFirst, pageMatch)) continue;
+    apply(pageMatch);
+    return true;
+  }
+  return false;
+}
+
+bool EpubReaderActivity::clippingRangeOnPage(const size_t clippingIndex, const Clipping& clipping, const Page& page,
+                                             const uint16_t currentPage, const uint16_t currentPageCount,
+                                             const uint32_t layoutSignature, uint16_t& startWord,
+                                             uint16_t& endWord) const {
+  if (clippingStoredRangeMatchesLayout(clipping, currentPageCount, layoutSignature)) {
+    if (currentPage < clipping.startPage || currentPage > clipping.endPage) return false;
+    startWord = currentPage == clipping.startPage ? clipping.startWordIndex : 0;
+    endWord = currentPage == clipping.endPage ? clipping.endWordIndex : UINT16_MAX;
+    return startWord <= endWord;
+  }
+  if ((clipping.textMatchBoundaries & CLIPPING_TEXT_MATCH_AUTHORITATIVE) != 0 &&
+      clipping.textMatchSignature == layoutSignature) {
+    return clippingTextMatchOnPage(clipping, currentPage, layoutSignature, startWord, endWord);
+  }
+
+  if (!CLIPPINGS.readClippingText(clipping, clippingTextScratch) || clippingTextScratch.empty()) return false;
+  bool startsAtClipStart = false;
+  bool reachesClipEnd = false;
+  if (!matchClippingOnPage(currentPage, page, clippingTextScratch.c_str(), startWord, endWord, &startsAtClipStart,
+                           &reachesClipEnd)) {
+    return false;
+  }
+  CLIPPINGS.noteTextMatch(clippingIndex, currentPage, startWord, endWord, startsAtClipStart, reachesClipEnd,
+                          ClippingTextAnchor::countUnits(clippingTextScratch.c_str()), layoutSignature);
+  return true;
+}
+
+uint16_t EpubReaderActivity::resolveClippingJumpPage(const Clipping& clipping) const {
+  if (!section || section->pageCount <= 0) return clipping.startPage;
+  const uint16_t pageCount = static_cast<uint16_t>(std::min<int>(section->pageCount, UINT16_MAX));
+  const uint32_t layoutSignature = clippingWordLayoutSignature(currentClippingLayoutSignature());
+  if (clippingStoredRangeMatchesLayout(clipping, pageCount, layoutSignature)) {
+    return std::min(clipping.startPage, static_cast<uint16_t>(pageCount - 1));
+  }
+
+  const uint16_t approximate = approximateRelayoutPage(clipping, pageCount);
+  if (!CLIPPINGS.readClippingText(clipping, clippingTextScratch) || clippingTextScratch.empty()) return approximate;
+
+  const auto pageContains = [&](const uint16_t page, ClippingTextAnchor::AnchorMatch& match) {
+    auto loaded = section->loadPage(page);
+    if (!loaded) return false;
+    uint16_t startWord = 0;
+    uint16_t endWord = 0;
+    bool starts = false;
+    bool reaches = false;
+    if (!matchClippingOnPage(page, *loaded, clippingTextScratch.c_str(), startWord, endWord, &starts, &reaches)) {
+      return false;
+    }
+    match.startWord = startWord;
+    match.endWord = endWord;
+    match.startsAtClipStart = starts;
+    match.reachesClipEnd = reaches;
+    return true;
+  };
+
+  constexpr uint16_t kSearchRadius = 8;
+  const auto searchNear = [&](const uint16_t center) -> std::optional<uint16_t> {
+    const auto accept = [&](const uint16_t page) -> std::optional<uint16_t> {
+      ClippingTextAnchor::AnchorMatch match;
+      if (!pageContains(page, match)) return std::nullopt;
+      uint16_t best = page;
+      // Walk back to the page where this clipping starts.
+      constexpr uint16_t kWalkBackPages = 16;
+      for (uint16_t cursor = page; cursor > 0 && page - cursor < kWalkBackPages; --cursor) {
+        ClippingTextAnchor::AnchorMatch previous;
+        if (!pageContains(static_cast<uint16_t>(cursor - 1), previous)) break;
+        best = static_cast<uint16_t>(cursor - 1);
+        if (previous.startsAtClipStart) return best;
+      }
+      return best;
+    };
+    const uint16_t clamped = std::min(center, static_cast<uint16_t>(pageCount - 1));
+    if (const auto hit = accept(clamped)) return hit;
+    for (uint16_t distance = 1; distance <= kSearchRadius; ++distance) {
+      if (clamped >= distance) {
+        if (const auto hit = accept(static_cast<uint16_t>(clamped - distance))) return hit;
+      }
+      if (static_cast<uint32_t>(clamped) + distance < pageCount) {
+        if (const auto hit = accept(static_cast<uint16_t>(clamped + distance))) return hit;
+      }
+    }
+    return std::nullopt;
+  };
+
+  if (const auto hit = searchNear(approximate)) return *hit;
+  if (clipping.paragraphIndex != UINT16_MAX) {
+    if (const auto paragraphPage = section->getPageForParagraphIndex(clipping.paragraphIndex)) {
+      if (const auto hit = searchNear(std::min(*paragraphPage, static_cast<uint16_t>(pageCount - 1)))) return *hit;
+    }
+  }
+  return approximate;
 }
 
 void EpubReaderActivity::drawClippingHighlights(const Page& page, const int fontId, const int orientedMarginTop,
@@ -4216,6 +4486,7 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
 
   const uint16_t currentPage = static_cast<uint16_t>(section->currentPage);
   const uint16_t currentPageCount = static_cast<uint16_t>(section->pageCount);
+  const uint32_t layoutSignature = clippingWordLayoutSignature(currentClippingLayoutSignature());
   const int lineHeight = renderer.getLineHeight(fontId);
 
   struct Range {
@@ -4225,18 +4496,18 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
   Range ranges[CLIPPING_MAX_PAGE_MATCHES];
   uint16_t rangeCount = 0;
 
-  for (const Clipping& clipping : CLIPPINGS.getClippings()) {
+  const auto& clippings = CLIPPINGS.getClippings();
+  for (size_t clippingIndex = 0; clippingIndex < clippings.size(); ++clippingIndex) {
+    const Clipping& clipping = clippings[clippingIndex];
     if (clipping.spineIndex != static_cast<uint16_t>(currentSpineIndex)) continue;
-    if (currentPage < clipping.startPage || currentPage > clipping.endPage) continue;
-    // Prefer exact numeric anchors when layout page count still matches.
-    if (clipping.pageCount == currentPageCount) {
-      uint16_t startWord = 0;
-      uint16_t endWord = UINT16_MAX;
-      if (currentPage == clipping.startPage) startWord = clipping.startWordIndex;
-      if (currentPage == clipping.endPage) endWord = clipping.endWordIndex;
-      if (startWord <= endWord && rangeCount < CLIPPING_MAX_PAGE_MATCHES) {
-        ranges[rangeCount++] = {startWord, endWord};
-      }
+    uint16_t startWord = 0;
+    uint16_t endWord = 0;
+    if (!clippingRangeOnPage(clippingIndex, clipping, page, currentPage, currentPageCount, layoutSignature, startWord,
+                             endWord)) {
+      continue;
+    }
+    if (startWord <= endWord && rangeCount < CLIPPING_MAX_PAGE_MATCHES) {
+      ranges[rangeCount++] = {startWord, endWord};
     }
   }
   if (rangeCount == 0) return;
@@ -4258,15 +4529,7 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
     const int rubyShift = block->getRubyShift(ascender);
     for (uint16_t i = 0; i < block->wordCount(); ++i) {
       const char* text = block->wordText(i);
-      if (!text || !*text) continue;
-      bool visible = false;
-      for (const uint8_t* p = reinterpret_cast<const uint8_t*>(text); *p; ++p) {
-        if (*p > 0x20) {
-          visible = true;
-          break;
-        }
-      }
-      if (!visible) continue;
+      if (!clippingWordVisible(text)) continue;
       const uint16_t thisWord = pageWordIndex++;
       if (!isHighlighted(thisWord)) continue;
 
