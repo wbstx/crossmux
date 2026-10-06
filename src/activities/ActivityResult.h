@@ -7,6 +7,8 @@
 #include <utility>
 #include <variant>
 
+#include "clippings/ClippingResults.h"
+
 struct WifiResult {
   bool connected = false;
   std::string ssid;
@@ -78,7 +80,8 @@ struct FilePathResult {
 
 using ResultVariant = std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult,
                                    IntervalResult, ChapterRangeResult, PageResult, TxtOffsetResult,
-                                   ProgressChangeResult, NetworkModeResult, FootnoteResult, FilePathResult>;
+                                   ProgressChangeResult, NetworkModeResult, FootnoteResult, FilePathResult,
+                                   ClippingResult, ClippingJumpResult>;
 
 struct ActivityResult {
   bool isCancelled = false;
