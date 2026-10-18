@@ -1738,7 +1738,8 @@ bool GfxRenderer::drawBitmapCropToFill(const Bitmap& bitmap, const int x, const 
   uint8_t* const rowBytes = outputRow + outputRowSize;
 
   const GfxRenderer::RenderMode mode = getRenderMode();
-  const auto runPixel = mapTwoBitPixel(mode, 0);
+  // Absolute gray planes are cleared to 0xFF, so every level is stored.
+  const bool absolutePlane = absoluteGrayPlanes && (mode == GRAYSCALE_LSB || mode == GRAYSCALE_MSB);
   for (int sourceRow = 0; sourceRow < sourceHeight; ++sourceRow) {
     if (bitmap.readNextRow(outputRow, rowBytes) != BmpReaderError::Ok) {
       LOG_ERR("GFX", "Failed to read crop-fill row %d", sourceRow);
@@ -1753,24 +1754,37 @@ bool GfxRenderer::drawBitmapCropToFill(const Bitmap& bitmap, const int x, const 
     if (clippedTop >= clippedBottom) continue;
 
     int runStart = -1;
+    bool runBlack = false;
     for (int sourceX = 0; sourceX <= sourceWidth; ++sourceX) {
       bool draw = false;
+      bool black = false;
       if (sourceX < sourceWidth) {
         const uint8_t value = outputRow[sourceX / 4] >> (6 - ((sourceX * 2) % 8)) & 0x3;
-        draw = mapTwoBitPixel(mode, value).draw;
+        if (absolutePlane) {
+          const auto pixel = grayPlanePixel(value, mode == GRAYSCALE_MSB, true);
+          draw = pixel.write;
+          black = pixel.black;
+        } else {
+          const auto pixel = mapTwoBitPixel(mode, value);
+          draw = pixel.draw;
+          black = pixel.state;
+        }
       }
-      if (draw && runStart < 0) {
-        runStart = sourceX;
-      } else if (!draw && runStart >= 0) {
+      const bool sameRun = draw && runStart >= 0 && black == runBlack;
+      if (sameRun) continue;
+      if (runStart >= 0) {
         const int runLeft = runStart * scaledWidth / sourceWidth - cropLeft;
         const int runRight = sourceX * scaledWidth / sourceWidth - cropLeft;
         const int clippedLeft = std::max(0, runLeft);
         const int clippedRight = std::min(targetWidth, runRight);
         if (clippedLeft < clippedRight) {
-          fillRect(x + clippedLeft, y + clippedTop, clippedRight - clippedLeft, clippedBottom - clippedTop,
-                   runPixel.state);
+          fillRect(x + clippedLeft, y + clippedTop, clippedRight - clippedLeft, clippedBottom - clippedTop, runBlack);
         }
         runStart = -1;
+      }
+      if (draw) {
+        runStart = sourceX;
+        runBlack = black;
       }
     }
   }
@@ -1947,6 +1961,12 @@ bool GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
       const uint8_t val = outputRow[bmpX / 4] >> (6 - ((bmpX * 2) % 8)) & 0x3;
 
       if (useTransparency && !opacityRow[bmpX]) {
+        continue;
+      }
+      // Absolute gray planes are cleared to 0xFF, so every level is stored.
+      if ((renderMode == GRAYSCALE_LSB || renderMode == GRAYSCALE_MSB) && absoluteGrayPlanes) {
+        const auto pixel = grayPlanePixel(val, renderMode == GRAYSCALE_MSB, true);
+        if (pixel.write) drawPixel(screenX, screenY, pixel.black);
         continue;
       }
       auto pixel = mapTwoBitPixel(renderMode, val);
